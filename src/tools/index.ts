@@ -6,24 +6,20 @@ import { SpamService } from '../services/spam-service.js';
 import { accountTools } from './account-tools.js';
 import { emailTools } from './email-tools.js';
 import { folderTools } from './folder-tools.js';
-import { spamTools } from './spam-tools.js';
 
 export function registerTools(
   server: McpServer,
   imapService: ImapService,
   accountManager: AccountManager,
   smtpService: SmtpService,
-  spamService: SpamService
+  _spamService: SpamService
 ): void {
-  // Register account management tools
+  // Account tools are limited to setup, listing, connection, and test actions.
   accountTools(server, accountManager, imapService, smtpService);
 
-  // Register email operation tools
+  // Email tools are limited to read/search/thread lookup actions.
   emailTools(server, imapService, accountManager, smtpService);
 
-  // Register folder operation tools
+  // Folder tools are limited to read-only discovery and status actions.
   folderTools(server, imapService, accountManager);
-
-  // Register spam detection and management tools
-  spamTools(server, imapService, spamService);
 }

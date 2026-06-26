@@ -10,11 +10,8 @@ export function accountTools(
   imapService: ImapService,
   smtpService: SmtpService
 ): void {
-  // Add account tool
-  // @ts-expect-error TS2589: MCP SDK registerTool + zod v3 exceed TS's type
-  // instantiation depth limit. Schema validation is unaffected at runtime.
   server.registerTool('imap_add_account', {
-    description: 'Add a new IMAP account configuration',
+    description: 'Add a new IMAP account configuration. Stores credentials locally in the server account store.',
     inputSchema: {
       name: z.string().describe('Friendly name for the account'),
       host: z.string().describe('IMAP server hostname'),
@@ -22,20 +19,9 @@ export function accountTools(
       user: z.string().describe('Username for authentication'),
       password: z.string().describe('Password for authentication'),
       tls: z.boolean().default(true).describe('Use TLS/SSL (default: true)'),
-      email: z.string().optional().describe('Email address (From: header). Defaults to user if omitted'),
-      smtpHost: z.string().optional().describe('SMTP server hostname. Defaults to IMAP host with imap.→smtp. rewrite'),
-      smtpPort: z.coerce.number().optional().describe('SMTP server port (465 for SMTPS, 587 for STARTTLS). Defaults to 587'),
-      smtpSecure: z.boolean().optional().describe('Use implicit TLS (SMTPS). Ignored for port 587/25 which always use STARTTLS, and for port 465 which always uses implicit TLS'),
+      email: z.string().optional().describe('Email address. Defaults to user if omitted'),
     }
-  }, async ({ name, host, port, user, password, tls, email, smtpHost, smtpPort, smtpSecure }) => {
-    const smtp = (smtpHost || smtpPort !== undefined || smtpSecure !== undefined)
-      ? {
-          host: smtpHost || host,
-          port: smtpPort ?? 587,
-          secure: smtpSecure ?? false,
-        }
-      : undefined;
-
+  }, async ({ name, host, port, user, password, tls, email }) => {
     const account = await accountManager.addAccount({
       name,
       host,
@@ -44,7 +30,6 @@ export function accountTools(
       password,
       tls,
       ...(email ? { email } : {}),
-      ...(smtp ? { smtp } : {}),
     });
 
     return {
@@ -59,9 +44,8 @@ export function accountTools(
     };
   });
 
-  // Update account tool — lets callers fix SMTP config (and other fields) on existing accounts
   server.registerTool('imap_update_account', {
-    description: 'Update an existing IMAP account. Useful for fixing SMTP settings without removing and re-adding the account.',
+    description: 'Update an existing IMAP account configuration. This changes local connection settings only; it does not alter mailbox contents.',
     inputSchema: {
       accountId: z.string().describe('ID of the account to update'),
       name: z.string().optional().describe('New friendly name'),
@@ -70,15 +54,9 @@ export function accountTools(
       user: z.string().optional().describe('IMAP username'),
       password: z.string().optional().describe('New password'),
       tls: z.boolean().optional().describe('Use TLS for IMAP'),
-      email: z.string().optional().describe('Email address (From: header)'),
-      smtpHost: z.string().optional().describe('SMTP hostname'),
-      smtpPort: z.coerce.number().optional().describe('SMTP port (465 for SMTPS, 587 for STARTTLS)'),
-      smtpSecure: z.boolean().optional().describe('Use implicit TLS (SMTPS). Port 587/25 always use STARTTLS regardless'),
-      smtpUser: z.string().optional().describe('SMTP username (if different from IMAP user)'),
-      smtpPassword: z.string().optional().describe('SMTP password (if different from IMAP password)'),
-      saveToSent: z.boolean().optional().describe('Save sent emails to the Sent folder'),
+      email: z.string().optional().describe('Email address'),
     }
-  }, async ({ accountId, name, host, port, user, password, tls, email, smtpHost, smtpPort, smtpSecure, smtpUser, smtpPassword, saveToSent }) => {
+  }, async ({ accountId, name, host, port, user, password, tls, email }) => {
     const existing = accountManager.getAccount(accountId);
     if (!existing) {
       throw new Error(`Account ${accountId} not found`);
@@ -92,24 +70,9 @@ export function accountTools(
     if (password !== undefined) updates.password = password;
     if (tls !== undefined) updates.tls = tls;
     if (email !== undefined) updates.email = email;
-    if (saveToSent !== undefined) updates.saveToSent = saveToSent;
 
-    const smtpTouched = [smtpHost, smtpPort, smtpSecure, smtpUser, smtpPassword].some(v => v !== undefined);
-    if (smtpTouched) {
-      const current = existing.smtp;
-      updates.smtp = {
-        host: smtpHost ?? current?.host ?? existing.host,
-        port: smtpPort ?? current?.port ?? 587,
-        secure: smtpSecure ?? current?.secure ?? false,
-        ...(smtpUser !== undefined ? { user: smtpUser } : current?.user ? { user: current.user } : {}),
-        ...(smtpPassword !== undefined ? { password: smtpPassword } : {}),
-      };
-    }
-
-    // Invalidate any cached SMTP transporter so the next send picks up new config
-    if (smtpTouched) {
-      smtpService.disconnect(accountId);
-    }
+    await imapService.disconnect(accountId);
+    smtpService.disconnect(accountId);
 
     const updated = await accountManager.updateAccount(accountId, updates);
 
@@ -120,19 +83,17 @@ export function accountTools(
           success: true,
           accountId: updated.id,
           message: `Account "${updated.name}" updated`,
-          smtp: updated.smtp ? { host: updated.smtp.host, port: updated.smtp.port, secure: updated.smtp.secure } : undefined,
         }, null, 2)
       }]
     };
   });
 
-  // List accounts tool
   server.registerTool('imap_list_accounts', {
-    description: 'List all configured IMAP accounts',
+    description: 'List all configured IMAP accounts without revealing passwords',
     inputSchema: {}
   }, async () => {
     const accounts = accountManager.getAllAccounts();
-    
+
     return {
       content: [{
         type: 'text',
@@ -150,28 +111,6 @@ export function accountTools(
     };
   });
 
-  // Remove account tool
-  server.registerTool('imap_remove_account', {
-    description: 'Remove an IMAP account configuration',
-    inputSchema: {
-      accountId: z.string().describe('ID of the account to remove'),
-    }
-  }, async ({ accountId }) => {
-    await imapService.disconnect(accountId);
-    await accountManager.removeAccount(accountId);
-    
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          success: true,
-          message: `Account ${accountId} removed successfully`,
-        }, null, 2)
-      }]
-    };
-  });
-
-  // Connect to account tool
   server.registerTool('imap_connect', {
     description: 'Connect to an IMAP account',
     inputSchema: {
@@ -180,7 +119,7 @@ export function accountTools(
     }
   }, async ({ accountId, accountName }) => {
     let account;
-    
+
     if (accountId) {
       account = accountManager.getAccount(accountId);
     } else if (accountName) {
@@ -188,13 +127,13 @@ export function accountTools(
     } else {
       throw new Error('Either accountId or accountName must be provided');
     }
-    
+
     if (!account) {
       throw new Error('Account not found');
     }
-    
+
     await imapService.connect(account);
-    
+
     return {
       content: [{
         type: 'text',
@@ -207,7 +146,6 @@ export function accountTools(
     };
   });
 
-  // Disconnect from account tool
   server.registerTool('imap_disconnect', {
     description: 'Disconnect from an IMAP account',
     inputSchema: {
@@ -227,9 +165,8 @@ export function accountTools(
     };
   });
 
-  // Test account connection tool (without re-entering password)
   server.registerTool('imap_test_account', {
-    description: 'Test an existing account connection without re-entering credentials. Validates IMAP connectivity and returns folder count and message count.',
+    description: 'Test an existing account connection without re-entering credentials. Validates IMAP connectivity and returns folder and message counts.',
     inputSchema: {
       accountId: z.string().describe('Account ID to test'),
     }
